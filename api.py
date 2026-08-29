@@ -1,115 +1,123 @@
 import os
-from fastapi import FastAPI, HTTPException
+import json
+import asyncio
+from typing import Dict, Any
+from dotenv import load_dotenv
+
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
-from dotenv import load_dotenv
-from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
-# Initialize FastAPI Application
+# --- Mock Database ---
+ORDERS_DB: Dict[str, Dict[str, Any]] = {
+    "ORD101": {"item": "Wireless Headphones", "status": "Shipped", "delivery_date": "Tomorrow at 2:00 PM"},
+    "ORD102": {"item": "Mechanical Keyboard", "status": "Processing", "delivery_date": "Pending"},
+    "ORD103": {"item": "USB-C Hub", "status": "Delivered", "delivery_date": "Delivered Yesterday"},
+}
+
+@tool
+def get_order_status(order_id: str) -> str:
+    """Fetch order status using the order ID."""
+    clean_id = order_id.upper().strip()
+    order = ORDERS_DB.get(clean_id)
+    if not order:
+        return f"Order '{clean_id}' was not found in our database."
+    return f"Order {clean_id} for '{order['item']}' is currently {order['status']}. Delivery info: {order['delivery_date']}."
+
+@tool
+def cancel_order(order_id: str) -> str:
+    """Cancel an order if eligible (must be 'Processing')."""
+    clean_id = order_id.upper().strip()
+    order = ORDERS_DB.get(clean_id)
+    if not order:
+        return f"Cannot cancel: Order '{clean_id}' not found."
+    if order["status"] == "Shipped":
+        return f"Cancellation failed: Order '{clean_id}' has already shipped."
+    if order["status"] == "Delivered":
+        return f"Cancellation failed: Order '{clean_id}' was already delivered."
+    
+    order["status"] = "Cancelled"
+    return f"Success: Order '{clean_id}' has been cancelled."
+
+# --- Agent Configuration ---
+tools = [get_order_status, cancel_order]
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
+memory = MemorySaver()
+
+system_prompt = (
+    "You are a helpful customer support agent for TechGear Store. "
+    "Always identify yourself as TechGear Support. Use your tools to check order statuses "
+    "and process cancellations. Be concise, polite, and strictly follow cancellation policies."
+)
+
+agent_executor = create_react_agent(
+    model=llm,
+    tools=tools,
+    checkpointer=memory,
+    prompt=system_prompt,
+)
+
+# --- FastAPI Initialization ---
 app = FastAPI(
     title="Customer Support AI Agent API",
     description="Production REST API for TechGear Customer Support Agent",
     version="1.0.0"
 )
 
-# Add CORS Middleware right after app = FastAPI(...)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows requests from any frontend port (e.g., Vite: 5173, CRA: 3000)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Provide your OpenAI API Key
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-# Mock Database & Custom Tools
-ORDERS_DB = {
-    "ORD101": {"item": "Wireless Headphones", "status": "Shipped", "delivery_date": "Tomorrow, 2:00 PM"},
-    "ORD102": {"item": "Mechanical Keyboard", "status": "Processing", "delivery_date": "Friday, 5:00 PM"},
-    "ORD103": {"item": "USB-C Hub", "status": "Delivered", "delivery_date": "Delivered on Monday"}
-}
-
-@tool
-def get_order_status(order_id: str) -> str:
-    """Retrieve shipping and delivery information for a specific order ID."""
-    order = ORDERS_DB.get(order_id.upper())
-    if order:
-        return f"Order {order_id.upper()}: Item: {order['item']} | Status: {order['status']} | Delivery: {order['delivery_date']}"
-    return f"Error: Order ID '{order_id}' was not found in our system."
-
-@tool
-def cancel_order(order_id: str) -> str:
-    """Cancel an existing order if it is still in Processing status."""
-    order = ORDERS_DB.get(order_id.upper())
-    if not order:
-        return f"Error: Order ID '{order_id}' does not exist."
-    if order["status"] == "Shipped":
-        return f"Cannot cancel Order {order_id.upper()}. It has already been shipped."
-    elif order["status"] == "Processing":
-        order["status"] = "Cancelled"
-        return f"Success: Order {order_id.upper()} has been cancelled successfully."
-    return f"Order {order_id.upper()} cannot be cancelled as it is already {order['status']}."
-
-tools = [get_order_status, cancel_order]
-
-# Initialize Agent & Memory
-llm = ChatOpenAI(
-    model="gpt-4o-mini",
-    api_key=OPENAI_API_KEY,
-    temperature=0.2
-)
-
-memory = MemorySaver()
-
-system_prompt = (
-    "You are a helpful Customer Support Agent for 'TechGear Store'.\n"
-    "Help customers check order statuses or cancel orders using tools.\n"
-    "Always maintain a polite tone and reply in English or Sinhala depending on the user's language."
-)
-
-agent = create_react_agent(
-    model=llm,
-    tools=tools,
-    prompt=system_prompt,
-    checkpointer=memory
-)
-
-# Pydantic Models for Request & Response Validation
 class ChatRequest(BaseModel):
     message: str
-    session_id: Optional[str] = "default_user"
-
-class ChatResponse(BaseModel):
     session_id: str
-    response: str
 
-# REST API Endpoints
+# --- Streaming Handler with Tuned Delay ---
+async def generate_chat_stream(message: str, session_id: str):
+    config = {"configurable": {"thread_id": session_id}}
+    try:
+        async for event in agent_executor.astream_events(
+            {"messages": [HumanMessage(content=message)]},
+            config=config,
+            version="v2"
+        ):
+            kind = event.get("event")
+            
+            # Stream LLM generated tokens
+            if kind == "on_chat_model_stream":
+                chunk = event.get("data", {}).get("chunk")
+                if chunk and hasattr(chunk, "content") and chunk.content:
+                    payload = json.dumps({"chunk": chunk.content})
+                    yield f"data: {payload}\n\n"
+                    # 40ms delay per token for natural, visible typing speed
+                    await asyncio.sleep(0.04)
+
+    except Exception as e:
+        err_payload = json.dumps({"chunk": f" [Server Error: {str(e)}] "})
+        yield f"data: {err_payload}\n\n"
+        
+    yield "data: [DONE]\n\n"
+
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest):
+    return StreamingResponse(
+        generate_chat_stream(request.message, request.session_id),
+        media_type="text/event-stream"
+    )
+
 @app.get("/health")
 def health_check():
-    """Health check endpoint for monitoring uptime."""
     return {"status": "healthy", "service": "AI Support Agent"}
-
-@app.post("/chat", response_model=ChatResponse)
-def chat_with_agent(payload: ChatRequest):
-    """Chat endpoint to interact with the AI Agent with session memory."""
-    try:
-        config = {"configurable": {"thread_id": payload.session_id}}
-        
-        agent_output = agent.invoke(
-            {"messages": [("user", payload.message)]},
-            config=config
-        )
-        
-        reply = agent_output["messages"][-1].content
-        return ChatResponse(session_id=payload.session_id, response=reply)
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
