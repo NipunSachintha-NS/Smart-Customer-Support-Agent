@@ -22,7 +22,6 @@ load_dotenv()
 # Initialize DB & Seed Data
 init_db()
 
-# --- SQLAlchemy Database Tools ---
 @tool
 def get_order_status(order_id: str) -> str:
     """Fetch real-time order status from the SQL database using the order ID."""
@@ -52,7 +51,6 @@ def cancel_order(order_id: str) -> str:
         if order.status == "Cancelled":
             return f"Order '{clean_id}' is already cancelled."
         
-        # Persistent Update
         order.status = "Cancelled"
         db.commit()
         return f"Success: Order '{clean_id}' has been marked as Cancelled in the database."
@@ -60,19 +58,20 @@ def cancel_order(order_id: str) -> str:
         db.close()
 
 @tool
-def create_support_ticket(session_id: str, issue_description: str) -> str:
-    """Create and persist a support ticket if an issue needs human escalation."""
+def create_support_ticket(issue_description: str) -> str:
+    """Create and persist a support ticket when a customer has a complaint, damaged item, or requires human escalation."""
     db = SessionLocal()
     try:
-        ticket = SupportTicket(session_id=session_id, issue_description=issue_description)
+        ticket = SupportTicket(issue_description=issue_description)
         db.add(ticket)
         db.commit()
         db.refresh(ticket)
         return f"Support ticket #{ticket.id} created successfully for issue: '{issue_description}'."
+    except Exception as e:
+        return f"Failed to create support ticket: {str(e)}"
     finally:
         db.close()
 
-# --- Agent Configuration ---
 tools = [get_order_status, cancel_order, create_support_ticket]
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
 memory = MemorySaver()
@@ -132,6 +131,23 @@ async def chat_stream(request: ChatRequest):
         media_type="text/event-stream"
     )
 
+@app.get("/tickets")
+def get_all_tickets():
+    """Retrieve all support tickets from the database."""
+    db = SessionLocal()
+    try:
+        tickets = db.query(SupportTicket).all()
+        return [
+            {
+                "id": t.id,
+                "issue_description": t.issue_description,
+                "created_at": t.created_at.isoformat() if t.created_at else None
+            }
+            for t in tickets
+        ]
+    finally:
+        db.close()
+
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "service": "AI Support Agent with Persistent DB"}
+    return {"status": "healthy", "service": "AI Support Agent"}
