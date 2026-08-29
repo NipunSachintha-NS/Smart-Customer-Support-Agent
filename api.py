@@ -16,6 +16,7 @@ from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 
 from database import init_db, SessionLocal, Order, SupportTicket
+from rag_engine import search_store_knowledge
 
 load_dotenv()
 
@@ -72,14 +73,21 @@ def create_support_ticket(issue_description: str) -> str:
     finally:
         db.close()
 
-tools = [get_order_status, cancel_order, create_support_ticket]
+@tool
+def lookup_store_policy(query: str) -> str:
+    """Search the TechGear knowledge base for store policies including returns, refunds, warranty periods, and shipping guidelines."""
+    return search_store_knowledge(query)
+
+tools = [get_order_status, cancel_order, create_support_ticket,lookup_store_policy]
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
 memory = MemorySaver()
 
 system_prompt = (
-    "You are a helpful customer support agent for TechGear Store. "
-    "Always identify yourself as TechGear Support. Use your database tools to query orders, "
-    "cancel processing orders, and file support tickets for user complaints. Strictly enforce policies."
+    "You are a professional customer support agent for TechGear Store. "
+    "Always identify yourself as TechGear Support. "
+    "For inquiries regarding return rules, warranty coverage, or shipping policies, always query the knowledge base tool (lookup_store_policy). "
+    "For order queries, use get_order_status or cancel_order. "
+    "For severe issues or damaged goods, create a support ticket. Be concise, polite, and precise."
 )
 
 agent_executor = create_react_agent(
