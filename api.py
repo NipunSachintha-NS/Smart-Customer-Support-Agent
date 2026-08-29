@@ -15,48 +15,72 @@ from langchain_core.messages import HumanMessage
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 
+from database import init_db, SessionLocal, Order, SupportTicket
+
 load_dotenv()
 
-# --- Mock Database ---
-ORDERS_DB: Dict[str, Dict[str, Any]] = {
-    "ORD101": {"item": "Wireless Headphones", "status": "Shipped", "delivery_date": "Tomorrow at 2:00 PM"},
-    "ORD102": {"item": "Mechanical Keyboard", "status": "Processing", "delivery_date": "Pending"},
-    "ORD103": {"item": "USB-C Hub", "status": "Delivered", "delivery_date": "Delivered Yesterday"},
-}
+# Initialize DB & Seed Data
+init_db()
 
+# --- SQLAlchemy Database Tools ---
 @tool
 def get_order_status(order_id: str) -> str:
-    """Fetch order status using the order ID."""
+    """Fetch real-time order status from the SQL database using the order ID."""
     clean_id = order_id.upper().strip()
-    order = ORDERS_DB.get(clean_id)
-    if not order:
-        return f"Order '{clean_id}' was not found in our database."
-    return f"Order {clean_id} for '{order['item']}' is currently {order['status']}. Delivery info: {order['delivery_date']}."
+    db = SessionLocal()
+    try:
+        order = db.query(Order).filter(Order.id == clean_id).first()
+        if not order:
+            return f"Order '{clean_id}' was not found in our database."
+        return f"Order {order.id} for '{order.item}' is currently {order.status}. Delivery info: {order.delivery_date}."
+    finally:
+        db.close()
 
 @tool
 def cancel_order(order_id: str) -> str:
-    """Cancel an order if eligible (must be 'Processing')."""
+    """Cancel an order in the SQL database if eligible (must be 'Processing')."""
     clean_id = order_id.upper().strip()
-    order = ORDERS_DB.get(clean_id)
-    if not order:
-        return f"Cannot cancel: Order '{clean_id}' not found."
-    if order["status"] == "Shipped":
-        return f"Cancellation failed: Order '{clean_id}' has already shipped."
-    if order["status"] == "Delivered":
-        return f"Cancellation failed: Order '{clean_id}' was already delivered."
-    
-    order["status"] = "Cancelled"
-    return f"Success: Order '{clean_id}' has been cancelled."
+    db = SessionLocal()
+    try:
+        order = db.query(Order).filter(Order.id == clean_id).first()
+        if not order:
+            return f"Cannot cancel: Order '{clean_id}' not found."
+        if order.status == "Shipped":
+            return f"Cancellation failed: Order '{clean_id}' has already shipped."
+        if order.status == "Delivered":
+            return f"Cancellation failed: Order '{clean_id}' was already delivered."
+        if order.status == "Cancelled":
+            return f"Order '{clean_id}' is already cancelled."
+        
+        # Persistent Update
+        order.status = "Cancelled"
+        db.commit()
+        return f"Success: Order '{clean_id}' has been marked as Cancelled in the database."
+    finally:
+        db.close()
+
+@tool
+def create_support_ticket(session_id: str, issue_description: str) -> str:
+    """Create and persist a support ticket if an issue needs human escalation."""
+    db = SessionLocal()
+    try:
+        ticket = SupportTicket(session_id=session_id, issue_description=issue_description)
+        db.add(ticket)
+        db.commit()
+        db.refresh(ticket)
+        return f"Support ticket #{ticket.id} created successfully for issue: '{issue_description}'."
+    finally:
+        db.close()
 
 # --- Agent Configuration ---
-tools = [get_order_status, cancel_order]
+tools = [get_order_status, cancel_order, create_support_ticket]
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
 memory = MemorySaver()
 
 system_prompt = (
     "You are a helpful customer support agent for TechGear Store. "
-    "Always identify yourself as TechGear Support. Use your tools to check order statuses "
-    "and process cancellations. Be concise, polite, and strictly follow cancellation policies."
+    "Always identify yourself as TechGear Support. Use your database tools to query orders, "
+    "cancel processing orders, and file support tickets for user complaints. Strictly enforce policies."
 )
 
 agent_executor = create_react_agent(
@@ -66,12 +90,7 @@ agent_executor = create_react_agent(
     prompt=system_prompt,
 )
 
-# --- FastAPI Initialization ---
-app = FastAPI(
-    title="Customer Support AI Agent API",
-    description="Production REST API for TechGear Customer Support Agent",
-    version="1.0.0"
-)
+app = FastAPI(title="Customer Support AI Agent API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -85,7 +104,6 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str
 
-# --- Streaming Handler with Tuned Delay ---
 async def generate_chat_stream(message: str, session_id: str):
     config = {"configurable": {"thread_id": session_id}}
     try:
@@ -95,16 +113,12 @@ async def generate_chat_stream(message: str, session_id: str):
             version="v2"
         ):
             kind = event.get("event")
-            
-            # Stream LLM generated tokens
             if kind == "on_chat_model_stream":
                 chunk = event.get("data", {}).get("chunk")
                 if chunk and hasattr(chunk, "content") and chunk.content:
                     payload = json.dumps({"chunk": chunk.content})
                     yield f"data: {payload}\n\n"
-                    # 40ms delay per token for natural, visible typing speed
                     await asyncio.sleep(0.04)
-
     except Exception as e:
         err_payload = json.dumps({"chunk": f" [Server Error: {str(e)}] "})
         yield f"data: {err_payload}\n\n"
@@ -120,4 +134,4 @@ async def chat_stream(request: ChatRequest):
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "service": "AI Support Agent"}
+    return {"status": "healthy", "service": "AI Support Agent with Persistent DB"}
