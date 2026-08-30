@@ -17,12 +17,14 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from database import init_db, SessionLocal, Order, SupportTicket
 from rag_engine import search_store_knowledge
+from guardrails import SafetyGuardrail
 
 load_dotenv()
 
-# Initialize DB & Seed Data
+# Initialize DB
 init_db()
 
+# --- Tools ---
 @tool
 def get_order_status(order_id: str) -> str:
     """Fetch real-time order status from the SQL database using the order ID."""
@@ -54,13 +56,13 @@ def cancel_order(order_id: str) -> str:
         
         order.status = "Cancelled"
         db.commit()
-        return f"Success: Order '{clean_id}' has been marked as Cancelled in the database."
+        return f"Success: Order '{clean_id}' has been marked as Cancelled."
     finally:
         db.close()
 
 @tool
 def create_support_ticket(issue_description: str) -> str:
-    """Create and persist a support ticket when a customer has a complaint, damaged item, or requires human escalation."""
+    """Create and persist a support ticket when a customer requires human escalation."""
     db = SessionLocal()
     try:
         ticket = SupportTicket(issue_description=issue_description)
@@ -75,19 +77,20 @@ def create_support_ticket(issue_description: str) -> str:
 
 @tool
 def lookup_store_policy(query: str) -> str:
-    """Search the TechGear knowledge base for store policies including returns, refunds, warranty periods, and shipping guidelines."""
+    """Search TechGear store policies regarding returns, refunds, warranty, and shipping."""
     return search_store_knowledge(query)
 
-tools = [get_order_status, cancel_order, create_support_ticket,lookup_store_policy]
+# --- Agent Configuration ---
+tools = [get_order_status, cancel_order, create_support_ticket, lookup_store_policy]
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
 memory = MemorySaver()
 
 system_prompt = (
     "You are a professional customer support agent for TechGear Store. "
     "Always identify yourself as TechGear Support. "
-    "For inquiries regarding return rules, warranty coverage, or shipping policies, always query the knowledge base tool (lookup_store_policy). "
+    "For inquiries regarding return rules, warranty coverage, or shipping policies, query lookup_store_policy. "
     "For order queries, use get_order_status or cancel_order. "
-    "For severe issues or damaged goods, create a support ticket. Be concise, polite, and precise."
+    "For damaged items or disputes, create a support ticket. Be concise, polite, and safe."
 )
 
 agent_executor = create_react_agent(
@@ -97,7 +100,7 @@ agent_executor = create_react_agent(
     prompt=system_prompt,
 )
 
-app = FastAPI(title="Customer Support AI Agent API", version="2.0.0")
+app = FastAPI(title="Customer Support AI Agent API with Guardrails", version="4.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -111,11 +114,20 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str
 
+# --- Streaming Handler with Input Guardrails ---
 async def generate_chat_stream(message: str, session_id: str):
+    # 1. Input Guardrail Inspection
+    is_safe, sanitized_input, violation_msg = SafetyGuardrail.sanitize_input(message)
+    if not is_safe:
+        payload = json.dumps({"chunk": violation_msg})
+        yield f"data: {payload}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
     config = {"configurable": {"thread_id": session_id}}
     try:
         async for event in agent_executor.astream_events(
-            {"messages": [HumanMessage(content=message)]},
+            {"messages": [HumanMessage(content=sanitized_input)]},
             config=config,
             version="v2"
         ):
@@ -126,6 +138,7 @@ async def generate_chat_stream(message: str, session_id: str):
                     payload = json.dumps({"chunk": chunk.content})
                     yield f"data: {payload}\n\n"
                     await asyncio.sleep(0.04)
+
     except Exception as e:
         err_payload = json.dumps({"chunk": f" [Server Error: {str(e)}] "})
         yield f"data: {err_payload}\n\n"
@@ -141,7 +154,6 @@ async def chat_stream(request: ChatRequest):
 
 @app.get("/tickets")
 def get_all_tickets():
-    """Retrieve all support tickets from the database."""
     db = SessionLocal()
     try:
         tickets = db.query(SupportTicket).all()
@@ -158,4 +170,4 @@ def get_all_tickets():
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "service": "AI Support Agent"}
+    return {"status": "healthy", "service": "AI Support Agent with Guardrails & Safety Layer"}
