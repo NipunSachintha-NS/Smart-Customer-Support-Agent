@@ -1,17 +1,20 @@
 # 🤖 Autonomous AI Customer Support Agent 
 
-A production-grade, containerized AI Customer Support Agent built with **LangGraph**, **FastAPI**, and **React**. The system leverages ReAct agent patterns, dynamic tool calling with business rule validation, conversational memory checkpoints and session isolation.
+An enterprise-grade, production-ready AI Customer Support Agent built with **FastAPI**, **LangGraph (ReAct Framework)**, **OpenAI (GPT-4o-mini)**, **SQLAlchemy (SQLite)**, **ChromaDB (RAG)**, and **React + Vite + Tailwind CSS**.
+
+The system handles real-time order tracking, dynamic database updates, support ticket escalation, knowledge base semantic search, guardrail security filters and real-time token streaming with low-latency execution.
 
 ---
 
 ## 🌟 Key Features
 
-- **Autonomous Tool Calling**: Uses OpenAI models via LangGraph to automatically determine whether to query order statuses or execute cancellations.
-- **Business Rule Enforcement**: Built-in validation prevents cancellation of orders that have already shipped.
-- **Thread-Level Memory Isolation**: Uses LangGraph's `MemorySaver` to maintain persistent multi-turn conversations scoped strictly to unique `session_id` threads.
-- **RESTful Microservice Architecture**: FastAPI backend structured with Pydantic data validation schemas and CORS security.
-- **Modern Responsive UI**: Built with React (Vite), Tailwind CSS, and Lucide Icons with real-time feedback and session resets.
-- **Dockerized Deployment**: Fully containerized backend service running on lightweight `python:3.11-slim`.
+* **⚡ Real-Time Token Streaming (SSE):** FastAPI SSE (`text/event-stream`) integration with token-by-token decoding and typing effects on the frontend.
+* **🧠 ReAct Agent Architecture (LangGraph):** Autonomous tool-calling workflow with conversation state checkpointer memory.
+* **💾 Persistent Database Layer (SQLAlchemy + SQLite):** Live database CRUD operations for querying orders, mutating order statuses (e.g., cancellations), and logging customer support tickets.
+* **📚 RAG Knowledge Base (ChromaDB Vector Store):** Semantic search for company policies, return rules, and warranty guidelines using OpenAI embeddings (`text-embedding-3-small`).
+* **🛡️ Security & Guardrails Layer:** Regex-based PII redaction (Credit Cards, Passwords, Emails) and prompt injection/jailbreak defense.
+* **🐳 Dockerized Architecture:** Multi-stage production container setup for backend services.
+* **🎨 Modern UI/UX:** Responsive dark mode interface with typing indicators, auto-scrolling, and session resets.
 
 ---
 
@@ -20,7 +23,10 @@ A production-grade, containerized AI Customer Support Agent built with **LangGra
 - **Frontend**: React 18, Vite, Tailwind CSS, Axios, Lucide React
 - **Backend**: FastAPI, Uvicorn, Pydantic, Python-dotenv
 - **AI / Agentic Framework**: LangGraph, LangChain-OpenAI
-- **Containerization**: Docker, Docker Compose
+- **Vector DB / RAG** : ChromaDB, OpenAI Embeddings 
+- **Database & ORM** : SQLite, SQLAlchemy |
+- **Observability** : LangSmith Tracing v2 |
+- **DevOps** : Docker, Docker Volumes |
 
 
 
